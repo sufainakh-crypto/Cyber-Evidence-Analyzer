@@ -165,7 +165,11 @@ def query_urlscan(input_value: str, input_type: str) -> Optional[Dict[str, Any]]
 
 
 def fetch_threat_intelligence(input_value: str, input_type: str) -> Dict[str, Any]:
-    """Safely fetch and aggregate threat intelligence from all available APIs."""
+    """Safely fetch and aggregate threat intelligence from all available APIs.
+    
+    Provides structured status for each provider: CONFIGURED, KEY_MISSING, UNAVAILABLE, or NOT_APPLICABLE.
+    Explicitly enforces that missing threat intelligence does not imply safety.
+    """
     raw_results = []
 
     # VirusTotal
@@ -173,10 +177,16 @@ def fetch_threat_intelligence(input_value: str, input_type: str) -> Dict[str, An
     if vt_res:
         raw_results.append(vt_res)
 
-    # AbuseIPDB
+    # AbuseIPDB (only for IP)
     abuse_res = query_abuseipdb(input_value, input_type)
     if abuse_res:
         raw_results.append(abuse_res)
+    else:
+        raw_results.append({
+            "source": "AbuseIPDB",
+            "status": "not_applicable",
+            "message": "AbuseIPDB only inspects IP addresses."
+        })
 
     # urlscan.io
     urlscan_res = query_urlscan(input_value, input_type)
@@ -185,11 +195,21 @@ def fetch_threat_intelligence(input_value: str, input_type: str) -> Dict[str, An
 
     active_sources: List[str] = []
     summary_parts: List[str] = []
+    sources_detail: List[Dict[str, Any]] = []
     score_delta: float = 0.0
 
     for res in raw_results:
         src = res["source"]
         st = res["status"]
+
+        detail_item = {
+            "source": src,
+            "status": st,
+            "configured": st != "key_missing",
+            "data_received": st == "success",
+            "score_delta": 0.0,
+            "explanation": "",
+        }
 
         if st == "success":
             active_sources.append(src)
@@ -197,49 +217,64 @@ def fetch_threat_intelligence(input_value: str, input_type: str) -> Dict[str, An
                 mal = res.get("malicious", 0)
                 susp = res.get("suspicious", 0)
                 tot = res.get("total_vendors", 0)
+                vt_delta = (mal * 15.0) + (susp * 5.0)
+                score_delta += vt_delta
+                detail_item["score_delta"] = vt_delta
+                detail_item["detections"] = {"malicious": mal, "suspicious": susp, "harmless": res.get("harmless", 0), "total": tot}
                 if mal > 0 or susp > 0:
-                    score_delta += (mal * 15.0) + (susp * 5.0)
-                    summary_parts.append(
-                        f"VirusTotal detected {mal} malicious and {susp} suspicious security vendor flags (out of {tot})."
-                    )
+                    exp = f"Detected {mal} malicious and {susp} suspicious security vendor flags out of {tot} engines."
+                    summary_parts.append(f"VirusTotal: {exp}")
+                    detail_item["explanation"] = exp
                 else:
-                    summary_parts.append(
-                        f"VirusTotal: Clean ({tot} security vendors analyzed, 0 detections)."
-                    )
+                    exp = f"Clean across {tot} security vendor engines (0 detections). Note: recent or targeted threats may not yet be indexed."
+                    summary_parts.append(f"VirusTotal: Clean ({tot} engines).")
+                    detail_item["explanation"] = exp
 
             elif src == "AbuseIPDB":
                 score = res.get("abuse_score", 0)
                 reports = res.get("total_reports", 0)
                 isp = res.get("isp", "Unknown")
                 country = res.get("country", "Unknown")
+                abuse_delta = score * 0.5
+                score_delta += abuse_delta
+                detail_item["score_delta"] = abuse_delta
+                detail_item["detections"] = {"abuse_score": score, "total_reports": reports, "isp": isp, "country": country}
                 if score > 0:
-                    score_delta += score * 0.5
-                    summary_parts.append(
-                        f"AbuseIPDB abuse confidence score: {score}% with {reports} report(s). ISP: {isp} ({country})."
-                    )
+                    exp = f"Abuse confidence score of {score}% with {reports} community report(s). ISP: {isp} ({country})."
+                    summary_parts.append(f"AbuseIPDB: {exp}")
+                    detail_item["explanation"] = exp
                 else:
-                    summary_parts.append(
-                        f"AbuseIPDB: 0% abuse confidence score ({reports} reports). ISP: {isp} ({country})."
-                    )
+                    exp = f"0% abuse confidence score ({reports} reports). ISP: {isp} ({country})."
+                    summary_parts.append(f"AbuseIPDB: 0% abuse score.")
+                    detail_item["explanation"] = exp
 
             elif src == "urlscan.io":
                 total = res.get("total_scans", 0)
                 mal = res.get("malicious_scans", 0)
+                urlscan_delta = mal * 20.0
+                score_delta += urlscan_delta
+                detail_item["score_delta"] = urlscan_delta
+                detail_item["detections"] = {"total_scans": total, "malicious_scans": mal}
                 if mal > 0:
-                    score_delta += mal * 20.0
-                    summary_parts.append(
-                        f"urlscan.io: {mal} out of {total} recent scan(s) flagged as malicious."
-                    )
+                    exp = f"{mal} out of {total} recent scans flagged as malicious."
+                    summary_parts.append(f"urlscan.io: {exp}")
+                    detail_item["explanation"] = exp
                 else:
-                    summary_parts.append(
-                        f"urlscan.io: Clean ({total} historical scans reviewed, 0 malicious)."
-                    )
+                    exp = f"0 malicious scans found across {total} historical submissions."
+                    summary_parts.append(f"urlscan.io: Clean ({total} historical scans).")
+                    detail_item["explanation"] = exp
 
         elif st == "key_missing":
-            summary_parts.append(f"{src}: API key missing in environment (.env).")
+            detail_item["explanation"] = "API key not configured in backend environment (.env). External intelligence query skipped."
+            summary_parts.append(f"{src}: Not Configured (API key missing).")
+        elif st == "not_applicable":
+            detail_item["explanation"] = res.get("message", "Not applicable for this input type.")
         elif st == "error":
             msg = res.get("message", "Threat intelligence source unavailable")
-            summary_parts.append(f"{src}: {msg}.")
+            detail_item["explanation"] = f"Service returned error or timed out: {msg}. Source unavailable."
+            summary_parts.append(f"{src}: Unavailable ({msg}).")
+
+        sources_detail.append(detail_item)
 
     summary_text = " ".join(summary_parts) if summary_parts else "No threat intelligence queries were executed."
 
@@ -247,4 +282,10 @@ def fetch_threat_intelligence(input_value: str, input_type: str) -> Dict[str, An
         "sources": active_sources,
         "summary": summary_text,
         "score_delta": score_delta,
+        "sources_detail": sources_detail,
+        "forensic_notice": (
+            "Unconfigured, missing, or unavailable threat intelligence feeds are NOT treated as evidence of safety. "
+            "Zero detections do not prove benign status."
+        ),
     }
+

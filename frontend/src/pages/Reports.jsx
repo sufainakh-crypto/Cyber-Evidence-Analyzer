@@ -1,82 +1,116 @@
 import React, { useState, useEffect } from 'react';
 import { useLocation } from 'react-router-dom';
-import { createReport, getEvidence, getEvidenceById } from '../services/api';
+import { createReport, getEvidence, getCases } from '../services/api';
 
 function Reports() {
   const location = useLocation();
-  const [evidenceId, setEvidenceId] = useState('');
-  const [reportTitle, setReportTitle] = useState('Cyber Incident Evidence Report');
-  const [reportDesc, setReportDesc] = useState('');
+  const [reportScope, setReportScope] = useState('case'); // 'case' | 'evidence'
+  const [selectedCaseId, setSelectedCaseId] = useState('');
+  const [selectedEvidenceId, setSelectedEvidenceId] = useState('');
+  const [reportTitle, setReportTitle] = useState('Digital Forensics & Threat Incident Report');
+  const [investigatorNotes, setInvestigatorNotes] = useState('');
+
+  const [availableCases, setAvailableCases] = useState([]);
   const [availableEvidence, setAvailableEvidence] = useState([]);
   const [loading, setLoading] = useState(false);
+  const [dataLoading, setDataLoading] = useState(true);
   const [error, setError] = useState(null);
   const [reportResult, setReportResult] = useState(null);
-  const [evidenceDetail, setEvidenceDetail] = useState(null);
 
   useEffect(() => {
-    // If navigated from Analyze page with state
-    if (location.state?.evidence_id) {
-      setEvidenceId(location.state.evidence_id);
+    // If navigated with state from Case or Evidence or Analyze page
+    if (location.state?.case_id) {
+      setReportScope('case');
+      setSelectedCaseId(location.state.case_id);
+    } else if (location.state?.evidence_id) {
+      setReportScope('evidence');
+      setSelectedEvidenceId(location.state.evidence_id);
     }
 
-    // Load available evidence list for easy selection
-    const loadEvidenceList = async () => {
+    const loadSelectionData = async () => {
+      setDataLoading(true);
       try {
-        const data = await getEvidence();
-        setAvailableEvidence(data || []);
+        const [casesData, evData] = await Promise.all([
+          getCases().catch(() => []),
+          getEvidence().catch(() => []),
+        ]);
+        setAvailableCases(casesData || []);
+        setAvailableEvidence(evData || []);
+
+        // Default selection if available
+        if (!location.state?.case_id && casesData?.length > 0) {
+          setSelectedCaseId(casesData[0].case_id);
+        } else if (!location.state?.case_id && casesData?.length === 0 && evData?.length > 0) {
+          setReportScope('evidence');
+          setSelectedEvidenceId(evData[0].evidence_id);
+        }
       } catch (err) {
-        console.error("Could not load evidence list for selection:", err);
+        console.error("Could not load selection options:", err);
+      } finally {
+        setDataLoading(false);
       }
     };
-    loadEvidenceList();
+    loadSelectionData();
   }, [location.state]);
 
   const handleGenerateReport = async (e) => {
     e.preventDefault();
-    const cleanId = evidenceId.trim();
-    if (!cleanId) {
-      setError("Please provide a valid Evidence ID.");
-      return;
+    setError(null);
+    setReportResult(null);
+
+    let payload = {
+      title: reportTitle.trim() || "Digital Forensics & Threat Incident Report",
+      description: investigatorNotes.trim() || undefined,
+    };
+
+    if (reportScope === 'case') {
+      const cid = selectedCaseId.trim();
+      if (!cid) {
+        setError("Please select or enter an Investigation Case ID.");
+        return;
+      }
+      payload.case_id = cid;
+    } else {
+      const eid = selectedEvidenceId.trim();
+      if (!eid) {
+        setError("Please select or enter an Evidence ID.");
+        return;
+      }
+      payload.evidence_ids = [eid];
     }
 
     setLoading(true);
-    setError(null);
-    setReportResult(null);
-    setEvidenceDetail(null);
-
-    const payload = {
-      title: reportTitle.trim() || "Cyber Incident Evidence Report",
-      description: reportDesc.trim() || undefined,
-      evidence_ids: [cleanId],
-    };
-
     try {
-      // Call POST /reports
-      const reportResponse = await createReport(payload);
-      setReportResult(reportResponse);
-
-      // Attempt to load the associated evidence details for enriched report preview
-      try {
-        const detail = await getEvidenceById(cleanId);
-        setEvidenceDetail(detail);
-      } catch (detailErr) {
-        console.warn("Could not fetch associated evidence details:", detailErr);
+      const res = await createReport(payload);
+      if (res && res.data) {
+        setReportResult(res.data);
+      } else {
+        throw new Error("Invalid response format received from backend.");
       }
     } catch (err) {
-      console.error("Error generating report:", err);
-      setError("Unable to generate the report. Please check the Evidence ID and make sure the FastAPI backend is running.");
+      console.error("Error generating incident report:", err);
+      const detail = err.response?.data?.detail;
+      setError(detail || "Failed to generate report. Please verify your selection and backend connectivity.");
     } finally {
       setLoading(false);
     }
   };
 
-  const handleClear = () => {
-    setEvidenceId('');
-    setReportTitle('Cyber Incident Evidence Report');
-    setReportDesc('');
-    setError(null);
-    setReportResult(null);
-    setEvidenceDetail(null);
+  const handlePrint = () => {
+    window.print();
+  };
+
+  const handleDownloadJson = () => {
+    if (!reportResult) return;
+    const blob = new Blob([JSON.stringify(reportResult, null, 2)], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `${reportResult.report_id || 'incident-report'}.json`;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
   };
 
   const getBadgeClass = (level) => {
@@ -88,71 +122,152 @@ function Reports() {
     }
   };
 
+  const getIntegrityBadge = (status) => {
+    switch (status?.toUpperCase()) {
+      case 'VERIFIED':
+        return <span className="badge badge-verified">🛡️ VERIFIED (SHA-256)</span>;
+      case 'INTEGRITY_MISMATCH':
+        return <span className="badge badge-mismatch">⚠️ INTEGRITY MISMATCH</span>;
+      case 'UNHASHED_LEGACY':
+        return <span className="badge badge-neutral">ℹ️ LEGACY RECORD</span>;
+      default:
+        return <span className="badge badge-neutral">UNVERIFIED</span>;
+    }
+  };
+
   return (
-    <div className="page-container">
-      <div className="page-header">
+    <div className="page-container report-page-root">
+      {/* Configuration Header - hidden during print */}
+      <div className="page-header no-print">
         <div>
           <h1 className="page-title">Incident Reports</h1>
           <p className="page-subtitle">
-            Generate formal cyber threat intelligence and incident analysis reports from analyzed evidence items.
+            Generate formal, verifiable digital forensics and cyber threat intelligence incident reports with cryptographic audit trails.
           </p>
         </div>
+        {reportResult && (
+          <div style={{ display: 'flex', gap: '0.75rem' }}>
+            <button className="btn btn-primary" onClick={handlePrint}>
+              🖨️ Print / Save as PDF
+            </button>
+            <button className="btn btn-secondary" onClick={handleDownloadJson}>
+              📥 Export JSON
+            </button>
+          </div>
+        )}
       </div>
 
-      <div className="section-card">
+      {/* Generator Configuration Card - hidden during print */}
+      <div className="section-card no-print">
         <div className="section-header">
-          <h2>Generate Incident Report</h2>
-          <span className="badge badge-info">Report Builder</span>
+          <h2>Report Configuration</h2>
+          <span className="badge badge-info">Evidence &amp; Case Generator</span>
         </div>
 
         <form onSubmit={handleGenerateReport} className="report-form">
           <div className="form-group">
-            <label htmlFor="evidenceIdInput" className="form-label">
-              Evidence ID <span style={{ color: 'var(--high-color)' }}>*</span>
-            </label>
-            <div className="input-group">
-              <input
-                id="evidenceIdInput"
-                type="text"
-                className="input-field"
-                placeholder="Enter or paste an Evidence ID (UUID)"
-                value={evidenceId}
-                onChange={(e) => setEvidenceId(e.target.value)}
-                disabled={loading}
-              />
-              {availableEvidence.length > 0 && (
-                <select
-                  className="input-field"
-                  style={{ maxWidth: '280px', cursor: 'pointer' }}
-                  onChange={(e) => {
-                    if (e.target.value) setEvidenceId(e.target.value);
-                  }}
-                  value={evidenceId}
-                  disabled={loading}
-                >
-                  <option value="">-- Or Select Existing --</option>
-                  {availableEvidence.map((ev) => (
-                    <option key={ev.evidence_id || ev.id} value={ev.evidence_id}>
-                      {(ev.input_value || ev.input || '').substring(0, 22)} ({ev.risk_level})
-                    </option>
-                  ))}
-                </select>
-              )}
+            <label className="form-label">Report Target Scope</label>
+            <div style={{ display: 'flex', gap: '1rem', marginTop: '0.25rem' }}>
+              <label style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', cursor: 'pointer', color: 'var(--text-main)' }}>
+                <input
+                  type="radio"
+                  name="reportScope"
+                  value="case"
+                  checked={reportScope === 'case'}
+                  onChange={() => setReportScope('case')}
+                />
+                <strong>Investigation Case</strong> (Full case evidence + timeline)
+              </label>
+              <label style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', cursor: 'pointer', color: 'var(--text-main)' }}>
+                <input
+                  type="radio"
+                  name="reportScope"
+                  value="evidence"
+                  checked={reportScope === 'evidence'}
+                  onChange={() => setReportScope('evidence')}
+                />
+                <strong>Single Evidence Item</strong> (Standalone artifact analysis)
+              </label>
             </div>
-            <small className="form-hint">
-              Select from previously analyzed evidence records or paste an Evidence ID.
-            </small>
           </div>
 
+          {reportScope === 'case' ? (
+            <div className="form-group">
+              <label htmlFor="caseSelectInput" className="form-label">
+                Investigation Case <span style={{ color: 'var(--high-color)' }}>*</span>
+              </label>
+              <div className="input-group">
+                <input
+                  id="caseSelectInput"
+                  type="text"
+                  className="input-field"
+                  placeholder="Enter or select Case ID (e.g. CASE-001)"
+                  value={selectedCaseId}
+                  onChange={(e) => setSelectedCaseId(e.target.value)}
+                  disabled={loading}
+                />
+                {availableCases.length > 0 && (
+                  <select
+                    className="input-field"
+                    style={{ maxWidth: '300px', cursor: 'pointer' }}
+                    value={selectedCaseId}
+                    onChange={(e) => setSelectedCaseId(e.target.value)}
+                    disabled={loading}
+                  >
+                    <option value="">-- Select Case --</option>
+                    {availableCases.map((c) => (
+                      <option key={c.case_id} value={c.case_id}>
+                        {c.case_id}: {c.title.substring(0, 24)} ({c.evidence_count} items)
+                      </option>
+                    ))}
+                  </select>
+                )}
+              </div>
+              <small className="form-hint">
+                Select an open or reviewed case to aggregate all associated evidence records and chronological timeline.
+              </small>
+            </div>
+          ) : (
+            <div className="form-group">
+              <label htmlFor="evidenceSelectInput" className="form-label">
+                Evidence ID <span style={{ color: 'var(--high-color)' }}>*</span>
+              </label>
+              <div className="input-group">
+                <input
+                  id="evidenceSelectInput"
+                  type="text"
+                  className="input-field"
+                  placeholder="Enter or select Evidence ID (UUID or EV-001)"
+                  value={selectedEvidenceId}
+                  onChange={(e) => setSelectedEvidenceId(e.target.value)}
+                  disabled={loading}
+                />
+                {availableEvidence.length > 0 && (
+                  <select
+                    className="input-field"
+                    style={{ maxWidth: '300px', cursor: 'pointer' }}
+                    value={selectedEvidenceId}
+                    onChange={(e) => setSelectedEvidenceId(e.target.value)}
+                    disabled={loading}
+                  >
+                    <option value="">-- Select Evidence --</option>
+                    {availableEvidence.map((ev) => (
+                      <option key={ev.evidence_id} value={ev.evidence_id}>
+                        {ev.evidence_id.substring(0, 8)}: {(ev.input_value || ev.input).substring(0, 20)} ({ev.risk_level})
+                      </option>
+                    ))}
+                  </select>
+                )}
+              </div>
+            </div>
+          )}
+
           <div className="form-group">
-            <label htmlFor="reportTitleInput" className="form-label">
-              Report Title
-            </label>
+            <label htmlFor="reportTitleInput" className="form-label">Report Title</label>
             <input
               id="reportTitleInput"
               type="text"
               className="input-field"
-              placeholder="e.g., Cyber Incident Analysis Report"
               value={reportTitle}
               onChange={(e) => setReportTitle(e.target.value)}
               disabled={loading}
@@ -160,176 +275,269 @@ function Reports() {
           </div>
 
           <div className="form-group">
-            <label htmlFor="reportDescInput" className="form-label">
-              Incident Description / Notes (Optional)
-            </label>
+            <label htmlFor="notesInput" className="form-label">Investigator Notes &amp; Observations</label>
             <textarea
-              id="reportDescInput"
+              id="notesInput"
               className="input-field textarea-field"
               rows="3"
-              placeholder="Brief description or investigation findings..."
-              value={reportDesc}
-              onChange={(e) => setReportDesc(e.target.value)}
+              placeholder="Document chain-of-custody context, investigative hypothesis, or incident response actions taken..."
+              value={investigatorNotes}
+              onChange={(e) => setInvestigatorNotes(e.target.value)}
               disabled={loading}
-            ></textarea>
+            />
           </div>
 
           <div style={{ display: 'flex', gap: '0.75rem', marginTop: '0.5rem' }}>
             <button type="submit" className="btn btn-primary" disabled={loading}>
-              {loading ? '⏳ Generating report...' : '📄 Generate Incident Report'}
-            </button>
-            <button type="button" className="btn btn-secondary" onClick={handleClear} disabled={loading}>
-              ✕ Clear
+              {loading ? '⏳ Generating Forensic Report...' : '📄 Generate Incident Report'}
             </button>
           </div>
         </form>
-      </div>
 
-      {/* Generated Report Section */}
-      <div className="section-card">
-        <div className="section-header">
-          <h2>Report Preview</h2>
-          <span className={`badge ${reportResult ? 'badge-info' : 'badge-neutral'}`}>
-            {reportResult ? 'Report Output' : 'No Report Generated'}
-          </span>
-        </div>
-
-        {loading ? (
-          <div className="state-message">
-            <span className="spinner">⏳</span>
-            <p className="loading-text">Generating report...</p>
-          </div>
-        ) : error ? (
-          <div className="state-message error-box">
+        {error && (
+          <div className="state-message error-box" style={{ marginTop: '1rem', padding: '1rem' }}>
             <span className="error-icon">⚠️</span>
             <p className="error-text">{error}</p>
           </div>
-        ) : reportResult ? (
-          <div className="modal-body" style={{ padding: 0 }}>
-            {/* Backend Response Details */}
-            <div className="detail-grid">
-              {reportResult.message && (
-                <div className="detail-item full-width">
-                  <span className="detail-label">Backend Status</span>
-                  <span className="detail-value highlight">{reportResult.message}</span>
-                </div>
-              )}
+        )}
+      </div>
 
-              {reportResult.data?.title && (
-                <div className="detail-item">
-                  <span className="detail-label">Report Title</span>
-                  <span className="detail-value" style={{ fontWeight: 600 }}>{reportResult.data.title}</span>
+      {/* Formal Printable Incident Report Sheet */}
+      {reportResult ? (
+        <div className="report-paper-container">
+          <div className="printable-report-sheet">
+            {/* Report Header */}
+            <div className="report-doc-header">
+              <div className="report-brand">
+                <div className="report-logo">🛡️</div>
+                <div>
+                  <h1 className="report-main-title">CYBER INCIDENT FORENSIC REPORT</h1>
+                  <span className="report-sub-title">OPCODE IMPACT 2026 — DIGITAL FORENSICS &amp; THREAT INTELLIGENCE</span>
                 </div>
-              )}
+              </div>
+              <div className="report-meta-box">
+                <div><strong>Report ID:</strong> <code>{reportResult.report_id}</code></div>
+                <div><strong>Generated:</strong> {new Date(reportResult.generated_at).toLocaleString()}</div>
+                <div><strong>Classification:</strong> OFFICIAL INVESTIGATION RECORD</div>
+              </div>
+            </div>
 
-              {reportResult.data?.evidence_ids && (
-                <div className="detail-item">
-                  <span className="detail-label">Included Evidence IDs</span>
-                  <span className="detail-value">
-                    {reportResult.data.evidence_ids.map((id) => (
-                      <code key={id} className="evidence-code" style={{ marginRight: '0.5rem' }}>{id}</code>
-                    ))}
-                  </span>
-                </div>
-              )}
-
-              {reportResult.data?.description && (
-                <div className="detail-item full-width">
-                  <span className="detail-label">Description / Summary</span>
-                  <p className="detail-text-box">{reportResult.data.description}</p>
+            {/* Title & Case Banner */}
+            <div className="report-section-title-banner">
+              <h2>{reportResult.title}</h2>
+              {reportResult.case && (
+                <div className="report-case-pill">
+                  <span>Case: <strong>{reportResult.case.case_id}</strong> — {reportResult.case.title}</span>
+                  <span className="badge badge-info">Status: {reportResult.case.status}</span>
                 </div>
               )}
             </div>
 
-            {/* Associated Evidence Details if retrieved */}
-            {evidenceDetail && (
-              <div style={{ marginTop: '1.25rem', paddingTop: '1.25rem', borderTop: '1px solid var(--border-color)' }}>
-                <h3 style={{ fontSize: '1.1rem', marginBottom: '1rem', color: 'var(--text-main)' }}>
-                  Associated Evidence Information
-                </h3>
-                <div className="detail-grid">
-                  <div className="detail-item">
-                    <span className="detail-label">Input Target</span>
-                    <span className="detail-value highlight">{evidenceDetail.input_value || evidenceDetail.input}</span>
-                  </div>
+            {/* Investigator Notes */}
+            {reportResult.description && (
+              <div className="report-doc-section">
+                <h3 className="report-section-heading">1. Investigator Observations &amp; Incident Scope</h3>
+                <div className="report-notes-box">
+                  <p>{reportResult.description}</p>
+                </div>
+              </div>
+            )}
 
-                  <div className="detail-item">
-                    <span className="detail-label">Input Type</span>
-                    <span className="type-tag">{evidenceDetail.input_type}</span>
-                  </div>
+            {/* Executive Risk Summary */}
+            <div className="report-doc-section">
+              <h3 className="report-section-heading">2. Executive Risk &amp; Threat Summary</h3>
+              <div className="report-stats-grid">
+                <div className="report-stat-card">
+                  <span className="report-stat-label">Total Artifacts Analyzed</span>
+                  <span className="report-stat-value">{reportResult.summary.total_artifacts}</span>
+                </div>
+                <div className="report-stat-card">
+                  <span className="report-stat-label">Overall Risk Rating</span>
+                  <span className={`report-stat-value ${getBadgeClass(reportResult.summary.overall_risk_level)}`} style={{ padding: '0.2rem 0.6rem', borderRadius: '4px' }}>
+                    {reportResult.summary.overall_risk_level}
+                  </span>
+                </div>
+                <div className="report-stat-card">
+                  <span className="report-stat-label">Average Risk Score</span>
+                  <span className="report-stat-value">{reportResult.summary.average_risk_score} / 100</span>
+                </div>
+                <div className="report-stat-card">
+                  <span className="report-stat-label">Risk Distribution</span>
+                  <span style={{ fontSize: '0.9rem', color: 'var(--text-main)', marginTop: '0.25rem' }}>
+                    🟢 {reportResult.summary.low_count} Low &nbsp;|&nbsp; 
+                    🟡 {reportResult.summary.medium_count} Med &nbsp;|&nbsp; 
+                    🔴 {reportResult.summary.high_count} High
+                  </span>
+                </div>
+              </div>
+            </div>
 
-                  <div className="detail-item">
-                    <span className="detail-label">Risk Score</span>
-                    <span className="detail-value">{evidenceDetail.risk_score} / 100</span>
-                  </div>
+            {/* Evidence Inventory with Cryptographic Integrity */}
+            <div className="report-doc-section">
+              <h3 className="report-section-heading">3. Evidence Item Inventory &amp; Cryptographic Integrity Verification</h3>
+              <div className="table-container">
+                <table className="evidence-table" style={{ fontSize: '0.85rem' }}>
+                  <thead>
+                    <tr>
+                      <th>Evidence ID</th>
+                      <th>Artifact Input</th>
+                      <th>Type</th>
+                      <th>Risk</th>
+                      <th>Cryptographic Integrity Status</th>
+                      <th>Timestamp</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {reportResult.evidence_records.map((ev) => (
+                      <tr key={ev.evidence_id}>
+                        <td><code>{ev.evidence_id.substring(0, 10)}...</code></td>
+                        <td className="input-cell" title={ev.input_value}><strong>{ev.input_value}</strong></td>
+                        <td><span className="type-tag">{ev.input_type}</span></td>
+                        <td>
+                          <span className={`badge ${getBadgeClass(ev.risk_level)}`}>
+                            {ev.risk_level} ({ev.risk_score})
+                          </span>
+                        </td>
+                        <td>
+                          {getIntegrityBadge(ev.integrity_verification?.status)}
+                        </td>
+                        <td className="time-cell">{ev.timestamp ? new Date(ev.timestamp).toLocaleString() : 'N/A'}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
 
-                  <div className="detail-item">
-                    <span className="detail-label">Risk Level</span>
-                    <span className={`badge ${getBadgeClass(evidenceDetail.risk_level)}`}>
-                      {evidenceDetail.risk_level}
+              {/* Integrity detail per evidence */}
+              <div style={{ marginTop: '0.75rem', display: 'flex', flexDirection: 'column', gap: '0.5rem' }}>
+                {reportResult.evidence_records.map((ev) => (
+                  <div key={ev.evidence_id} className="integrity-detail-line">
+                    <span style={{ minWidth: '100px' }}><code>{ev.evidence_id.substring(0, 8)}</code>:</span>
+                    <span style={{ color: 'var(--text-muted)' }}>SHA-256 Hash:</span>
+                    <code style={{ wordBreak: 'break-all', fontSize: '0.8rem', color: 'var(--accent-color)' }}>
+                      {ev.sha256_hash || 'No hash recorded'}
+                    </code>
+                  </div>
+                ))}
+              </div>
+            </div>
+
+            {/* Detailed Findings per Artifact */}
+            <div className="report-doc-section">
+              <h3 className="report-section-heading">4. Forensic Analysis &amp; Threat Intelligence Details</h3>
+              {reportResult.evidence_records.map((ev, index) => (
+                <div key={ev.evidence_id} className="report-evidence-deep-card">
+                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '0.5rem', flexWrap: 'wrap', gap: '0.5rem' }}>
+                    <h4 style={{ margin: 0, fontSize: '0.95rem' }}>
+                      Artifact #{index + 1}: <code>{ev.input_value}</code> ({ev.input_type.toUpperCase()})
+                    </h4>
+                    <span className={`badge ${getBadgeClass(ev.risk_level)}`}>
+                      Score: {ev.risk_score} / 100 — {ev.risk_level}
                     </span>
                   </div>
 
-                  {evidenceDetail.timestamp && (
-                    <div className="detail-item">
-                      <span className="detail-label">Timestamp</span>
-                      <span className="detail-value">{new Date(evidenceDetail.timestamp).toLocaleString()}</span>
+                  {ev.findings && (
+                    <div style={{ marginBottom: '0.5rem' }}>
+                      <strong style={{ fontSize: '0.85rem', color: 'var(--text-muted)' }}>Heuristic Findings:</strong>
+                      <p style={{ margin: '0.2rem 0', fontSize: '0.85rem', color: 'var(--text-main)', lineHeight: 1.4 }}>
+                        {ev.findings}
+                      </p>
                     </div>
                   )}
 
-                  {evidenceDetail.url && (
-                    <div className="detail-item">
-                      <span className="detail-label">URL</span>
-                      <span className="detail-value">{evidenceDetail.url}</span>
-                    </div>
-                  )}
-
-                  {evidenceDetail.domain && (
-                    <div className="detail-item">
-                      <span className="detail-label">Domain</span>
-                      <span className="detail-value">{evidenceDetail.domain}</span>
-                    </div>
-                  )}
-
-                  {evidenceDetail.ip_address && (
-                    <div className="detail-item">
-                      <span className="detail-label">IP Address</span>
-                      <span className="detail-value">{evidenceDetail.ip_address}</span>
+                  {ev.threat_intelligence_summary && (
+                    <div style={{ marginBottom: '0.5rem' }}>
+                      <strong style={{ fontSize: '0.85rem', color: 'var(--text-muted)' }}>Threat Intelligence Summary:</strong>
+                      <p style={{ margin: '0.2rem 0', fontSize: '0.85rem', color: 'var(--text-main)', lineHeight: 1.4 }}>
+                        {ev.threat_intelligence_summary}
+                      </p>
                     </div>
                   )}
                 </div>
+              ))}
+            </div>
 
-                {evidenceDetail.findings && (
-                  <div className="detail-section" style={{ marginTop: '1rem' }}>
-                    <span className="detail-label">Findings</span>
-                    <p className="detail-text-box">{evidenceDetail.findings}</p>
-                  </div>
-                )}
-
-                {evidenceDetail.threat_intelligence_sources && (
-                  <div className="detail-section">
-                    <span className="detail-label">Threat Intelligence Sources</span>
-                    <span className="detail-value">{evidenceDetail.threat_intelligence_sources}</span>
-                  </div>
-                )}
-
-                {evidenceDetail.threat_intelligence_summary && (
-                  <div className="detail-section">
-                    <span className="detail-label">Threat Intelligence Summary</span>
-                    <p className="detail-text-box intel-summary">{evidenceDetail.threat_intelligence_summary}</p>
-                  </div>
-                )}
+            {/* Investigation Timeline */}
+            {reportResult.timeline && reportResult.timeline.length > 0 && (
+              <div className="report-doc-section">
+                <h3 className="report-section-heading">5. Chronological Investigation Timeline</h3>
+                <div className="timeline-container">
+                  {reportResult.timeline.map((evt, idx) => (
+                    <div key={idx} className="timeline-item">
+                      <div className="timeline-marker"></div>
+                      <div className="timeline-content">
+                        <div className="timeline-header">
+                          <strong className="timeline-title">{evt.title}</strong>
+                          <span className="timeline-time">
+                            {evt.timestamp ? new Date(evt.timestamp).toLocaleString() : 'N/A'}
+                          </span>
+                        </div>
+                        <p className="timeline-details">{evt.details}</p>
+                      </div>
+                    </div>
+                  ))}
+                </div>
               </div>
             )}
+
+            {/* Cross-Evidence Correlations if present */}
+            {reportResult.correlations && reportResult.correlations.length > 0 && (
+              <div className="report-doc-section">
+                <h3 className="report-section-heading">6. Cross-Evidence Correlation Findings</h3>
+                <div className="correlation-list">
+                  {reportResult.correlations.map((rel) => (
+                    <div key={rel.relationship_id} className="correlation-card" style={{ padding: '0.75rem' }}>
+                      <div className="correlation-header">
+                        <span style={{ fontSize: '0.85rem' }}>
+                          <code>{rel.source_input}</code> ⇄ <code>{rel.target_input}</code>
+                        </span>
+                        <span className="badge badge-info">{rel.relationship_type} ({rel.confidence_level} Confidence)</span>
+                      </div>
+                      <p style={{ fontSize: '0.82rem', margin: '0.35rem 0' }}>{rel.explanation}</p>
+                      <div className="caveat-box" style={{ fontSize: '0.75rem', padding: '0.4rem 0.6rem' }}>
+                        ⚖️ {rel.forensic_caveat}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+
+            {/* Forensic Limitations & Methodological Disclaimers */}
+            <div className="report-doc-section">
+              <h3 className="report-section-heading">7. Methodological Limitations &amp; Disclaimers</h3>
+              <div className="report-limitations-list">
+                {reportResult.limitations.map((lim, i) => (
+                  <div key={i} className="limitation-item">
+                    <strong>⚠️ {lim.title}:</strong>
+                    <p>{lim.content}</p>
+                  </div>
+                ))}
+              </div>
+            </div>
+
+            {/* Sign-off footer */}
+            <div className="report-sign-off">
+              <div className="sign-block">
+                <div className="sign-line"></div>
+                <span>Lead Forensic Investigator</span>
+              </div>
+              <div className="sign-block">
+                <div className="sign-line"></div>
+                <span>Incident Response Supervisor</span>
+              </div>
+            </div>
           </div>
-        ) : (
+        </div>
+      ) : (
+        <div className="section-card no-print">
           <div className="empty-state">
             <span className="empty-icon">📋</span>
-            <p className="empty-title">No Report Generated Yet</p>
-            <p className="empty-text">Provide an Evidence ID and click "Generate Incident Report" to create and preview an incident report.</p>
+            <p className="empty-title">Ready to Generate Incident Report</p>
+            <p className="empty-text">Select a Case or Evidence Item above and click "Generate Incident Report" to build a verifiable forensic report.</p>
           </div>
-        )}
-      </div>
+        </div>
+      )}
     </div>
   );
 }

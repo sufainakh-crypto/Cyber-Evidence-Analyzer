@@ -19,6 +19,12 @@ function Navbar() {
           <NavLink to="/evidence" className={({ isActive }) => (isActive ? 'nav-link active' : 'nav-link')}>
             Evidence
           </NavLink>
+          <NavLink to="/correlation" className={({ isActive }) => (isActive ? 'nav-link active' : 'nav-link')}>
+            Correlations
+          </NavLink>
+          <NavLink to="/cases" className={({ isActive }) => (isActive ? 'nav-link active' : 'nav-link')}>
+            Cases
+          </NavLink>
           <NavLink to="/reports" className={({ isActive }) => (isActive ? 'nav-link active' : 'nav-link')}>
             Reports
           </NavLink>

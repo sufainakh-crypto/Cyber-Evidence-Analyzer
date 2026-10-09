@@ -4,7 +4,9 @@ import Navbar from './components/Navbar';
 import Dashboard from './pages/Dashboard';
 import Analyze from './pages/Analyze';
 import Evidence from './pages/Evidence';
+import Cases from './pages/Cases';
 import Reports from './pages/Reports';
+import Correlation from './pages/Correlation';
 
 function App() {
   return (
@@ -16,6 +18,8 @@ function App() {
             <Route path="/" element={<Dashboard />} />
             <Route path="/analyze" element={<Analyze />} />
             <Route path="/evidence" element={<Evidence />} />
+            <Route path="/cases" element={<Cases />} />
+            <Route path="/correlation" element={<Correlation />} />
             <Route path="/reports" element={<Reports />} />
           </Routes>
         </main>
